@@ -1,4 +1,5 @@
 require "test_helper"
+require "benchmark"
 
 class ClientTest < TrilogyTest
   def test_trilogy_connected_host
@@ -123,11 +124,10 @@ class ClientTest < TrilogyTest
     create_test_table(client)
 
     refute_predicate client, :more_results_exist?
-    result = client.query("INSERT INTO trilogy_test (int_test) VALUES ('4')")
+    _ = client.query("INSERT INTO trilogy_test (int_test) VALUES ('4')")
     refute_predicate client, :more_results_exist?
 
-
-    result = client.query("INSERT INTO trilogy_test (int_test) VALUES ('4'); INSERT INTO trilogy_test (int_test) VALUES ('1')")
+    _ = client.query("INSERT INTO trilogy_test (int_test) VALUES ('4'); INSERT INTO trilogy_test (int_test) VALUES ('1')")
     assert_predicate client, :more_results_exist?
   end
 
@@ -180,6 +180,93 @@ class ClientTest < TrilogyTest
 
     assert_raises(Trilogy::DatabaseError) do
       client.next_result
+    end
+  end
+
+  def test_trilogy_abandon_results
+    client = new_tcp_client(multi_statement: true)
+    create_test_table(client)
+
+    client.query(<<~QUERY)
+      INSERT INTO trilogy_test (int_test) VALUES ('4');
+      INSERT INTO trilogy_test (int_test) VALUES ('5');
+      INSERT INTO trilogy_test (int_test) VALUES ('6')
+    QUERY
+
+    assert_predicate client, :more_results_exist?
+    result_count = client.abandon_results!
+
+    assert_equal 2, result_count
+
+    refute_predicate client, :more_results_exist?
+  end
+
+  def test_trilogy_abandon_results_raises_when_response_has_error
+    client = new_tcp_client(multi_statement: true)
+    create_test_table(client)
+
+     client.query(<<~QUERY)
+      INSERT INTO trilogy_test (int_test) VALUES ('4');
+      INSERT INTO trilogy_test (non_existent_column) VALUES ('5');
+      INSERT INTO trilogy_test (int_test) VALUES ('6')
+    QUERY
+
+    assert_predicate client, :more_results_exist?
+
+    assert_raises(Trilogy::DatabaseError) do
+      client.abandon_results!
+    end
+  end
+
+# ========================================================================
+# TEMPORARY: Benchmarking the differences between `abandon_results!` vs.
+# using `more_results_exists?` and `next_result` to achieve the same thing.
+# TODO: No statistical difference
+# -> Are we looking for differences in the right spot?
+# Assumption: I'd assume the performance (especially by IPS) is pretty similar,
+# I suspect there _may_ be difference in memory usage, as the Trilogy::Result
+# isn't returned in the `abandon_results!` usecase, while in `next_result` it
+# is.
+#
+# Warming up --------------------------------------
+#     #abandon_results    21.867k i/100ms
+# abandoning results using loop and next_result
+#                         21.866k i/100ms
+# Calculating -------------------------------------
+#     #abandon_results    678.295k (± 1.1%) i/s -      3.411M in   5.029741s
+# abandoning results using loop and next_result
+#                       669.107k (± 1.5%) i/s -      3.345M in   5.001164s
+#
+# ========================================================================
+  def test_benchmark_abandon_results
+    Benchmark.bm do |x|
+      client = new_tcp_client(multi_statement: true)
+      create_test_table(client)
+
+       x.report "#abandon_results" do
+         client.query(<<~QUERY)
+          INSERT INTO trilogy_test (int_test) VALUES ('4');
+          INSERT INTO trilogy_test (int_test) VALUES ('5');
+          INSERT INTO trilogy_test (int_test) VALUES ('6')
+        QUERY
+
+         client.abandon_results!
+       end
+
+      client = new_tcp_client(multi_statement: true)
+      create_test_table(client)
+
+       x.report "abandoning results using loop and next_result" do
+         client.query(<<~QUERY)
+          INSERT INTO trilogy_test (int_test) VALUES ('4');
+          INSERT INTO trilogy_test (int_test) VALUES ('5');
+          INSERT INTO trilogy_test (int_test) VALUES ('6')
+        QUERY
+
+         while client.more_results_exist?
+           client.next_result
+         end
+       end
     end
   end
 

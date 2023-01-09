@@ -6,3 +6,8 @@ group :benchmark do
   gem "mysql2"
   gem "benchmark-ips"
 end
+
+group :development do
+  gem "byebug"
+  gem "benchmark-ips"
+end
